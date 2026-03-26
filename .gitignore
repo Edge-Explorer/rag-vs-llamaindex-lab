@@ -11,3 +11,11 @@ wheels/
 
 # Credentials
 .env
+
+# Data and large files
+data/
+!data/.gitkeep
+
+# Mac and OS specifics
+.DS_Store
+Thumbs.db
