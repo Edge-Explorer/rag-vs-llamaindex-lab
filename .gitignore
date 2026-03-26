@@ -13,7 +13,7 @@ wheels/
 .env
 
 # Data and large files
-data/
+data/*
 !data/.gitkeep
 
 # Mac and OS specifics
