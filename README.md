@@ -2,7 +2,7 @@
 
 > **A hands-on engineering lab built to answer one question: What does a RAG framework actually do for you?**
 
-This repository contains two complete, working implementations of a Retrieval-Augmented Generation (RAG) pipeline — one built entirely from scratch, and one using the LlamaIndex framework — to provide a true apples-to-apples architectural comparison.
+This repository contains two complete, working implementations of a Retrieval-Augmented Generation (RAG) pipeline — one built entirely from scratch, and one using the LlamaIndex framework — to provide a true apples-to-apples architectural comparison, including a **real-time latency benchmark**.
 
 ---
 
@@ -29,6 +29,22 @@ Your Document
 
 ---
 
+## 🏆 Benchmark Results (Real Data)
+
+> Measured on 2026-03-29. See `latency/00_latency_benchmark.ipynb` for full details.
+
+| Stage | Pure RAG | LlamaIndex | Winner |
+|:---|:---:|:---:|:---:|
+| **Chunking** | `0.0000s` | *(combined)* | 🤝 |
+| **Embedding** | `9.6219s` | `0.7142s` | ⚡ LlamaIndex |
+| **Retrieval** | `0.4761s` | `0.4777s` | 🤝 Tie |
+| **Generation** | `1.0453s` | `1.5026s` | 🔬 Pure RAG |
+| **TOTAL** | **`11.14s`** | **`2.69s`** | ⚡ **LlamaIndex (4.1x faster)** |
+
+**The verdict:** LlamaIndex's **batch embedding** eliminated the serial API loop bottleneck — reducing embedding time from 9.6s to 0.7s (13.5x faster on that stage alone).
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -44,42 +60,49 @@ rag-vs-llamaindex-lab/
 │   ├── 02_custom_chunking.ipynb   # SentenceSplitter + transformations
 │   └── 03_retrieval_and_query.ipynb # Retrievers, top_k, source nodes
 │
-├── comparisons/
-│   └── retrieval_quality.md       # Full side-by-side analysis
+├── latency/                       # Real-world latency measurements
+│   ├── 00_latency_benchmark.ipynb # The stopwatch notebook
+│   └── latency_analysis.md        # Full analysis with real numbers
 │
-├── data/                          # Sample datasets
-└── utils/                         # Helper scripts
+├── comparisons/
+│   ├── retrieval_quality.md       # Stage-by-stage retrieval breakdown
+│   └── chunking_comparison.md     # Character vs token chunking analysis
+│
+└── data/                          # Sample datasets
 ```
 
 ---
 
-## ⚔️ The Comparison at a Glance
+## ⚔️ The Architecture Comparison
 
-| Stage | Pure RAG | LlamaIndex | Winner |
-|:---|:---|:---|:---:|
-| **Chunking** | Character-based sliding window | Token-aware `SentenceSplitter` | 🤝 Tie |
-| **Embedding** | Manual loop + API calls | `Settings.embed_model` + auto-batch | ⚡ LlamaIndex |
-| **Indexing** | Python list + NumPy | `VectorStoreIndex` | ⚡ LlamaIndex |
-| **Retrieval** | Manual dot-product sort | `.as_retriever(similarity_top_k=N)` | ⚡ LlamaIndex |
-| **Synthesis** | Manual prompt template | `CompactAndRefine` auto-synthesizer | ⚡ LlamaIndex |
-| **Transparency** | Every line is visible | Need `source_nodes` to see under the hood | 🔬 Pure RAG |
-| **Total Code** | ~115 lines | ~7 lines | ⚡ LlamaIndex |
+| Dimension | Pure RAG | LlamaIndex |
+|:---|:---|:---|
+| **Chunking** | Character sliding window | Token-aware `SentenceSplitter` |
+| **Embedding** | Serial `for` loop (slow) | Batched requests (fast) |
+| **Indexing** | Python list + NumPy | `VectorStoreIndex` |
+| **Retrieval** | Manual dot-product | `.as_retriever(similarity_top_k=N)` |
+| **Synthesis** | Manual prompt template | `CompactAndRefine` |
+| **Total Code** | ~115 lines | ~7 lines |
+| **Transparency** | ✅ Every line visible | ⚠️ Opt-in via `source_nodes` |
 
 ---
 
 ## 🔑 Key Learnings
 
-### 1. `similarity_top_k` is everything
-In our **Vault Experiment** (`03_retrieval_and_query.ipynb`), the model failed to answer "What is inside the vault?" with `top_k=2` — because the golden bar fact was ranked 3rd. With `top_k=3`, it answered perfectly. **Always calibrate your top-k to your use case.**
+### 1. Batching is the #1 optimization
+Going from a `for` loop to batched embedding requests was a **13.5x speedup** on that single stage. This is the most important engineering lesson in this entire lab.
 
-### 2. The LLM never touches retrieval
-The Embedding Model (`gemini-embedding-001`) handles the search math. The LLM (`gemini-2.0-flash`) only activates at the **final generation step**. This makes retrieval fast and cheap.
+### 2. `similarity_top_k` is everything
+In our **Vault Experiment** (`03_retrieval_and_query.ipynb`), the model failed to answer with `top_k=2` — the fact was ranked 3rd. With `top_k=3`, it succeeded. Always calibrate your top-k.
 
-### 3. Token-aware chunking > Character chunking
-LlamaIndex's `SentenceSplitter` won't cut a word in half. Our manual character chunker might. In production, always use boundary-aware chunking.
+### 3. The LLM never touches retrieval
+The Embedding Model (`gemini-embedding-001`) handles ALL the search math. The LLM (`gemini-2.0-flash`) only activates at the **final generation step**. Retrieval is fast and cheap.
 
-### 4. Frameworks hide the math, not replace it
-LlamaIndex runs the **exact same dot-product math** under the hood. It just wraps it in a friendly API. Understanding Pure RAG first means you can debug LlamaIndex when it misbehaves.
+### 4. Token-aware chunking > Character chunking
+`SentenceSplitter` respects sentence boundaries. Our character chunker can cut a word in half. In production, always use boundary-aware chunking.
+
+### 5. Frameworks hide the math — they don't replace it
+LlamaIndex runs the **exact same dot-product math** under the hood. Understanding Pure RAG first means you can debug LlamaIndex when it misbehaves.
 
 ---
 
@@ -92,7 +115,7 @@ LlamaIndex runs the **exact same dot-product math** under the hood. It just wrap
 | `llama-index-llms-google-genai` | Gemini LLM integration |
 | `llama-index-embeddings-google-genai` | Gemini Embedding integration |
 | `google-generativeai` | Direct Gemini API (Pure RAG) |
-| `nest_asyncio` | Notebook async compatibility fix |
+| `nest_asyncio` | Notebook async compatibility |
 | `python-dotenv` | API key management |
 | `uv` | Fast Python package manager |
 
@@ -119,7 +142,7 @@ echo "GEMINI_API_KEY=your_key_here" > .env
 uv run jupyter notebook
 ```
 
-> 💡 **Note**: Get your free Gemini API key at [aistudio.google.com](https://aistudio.google.com)
+> 💡 Get your free Gemini API key at [aistudio.google.com](https://aistudio.google.com)
 
 ---
 
@@ -129,7 +152,8 @@ uv run jupyter notebook
 2. `llamaindex_rag/01_basic_pipeline.ipynb` → See the abstraction.
 3. `llamaindex_rag/02_custom_chunking.ipynb` → Control the splitter.
 4. `llamaindex_rag/03_retrieval_and_query.ipynb` → Master top-k & source nodes.
-5. `comparisons/retrieval_quality.md` → Read the full verdict.
+5. `latency/00_latency_benchmark.ipynb` → **Run the stopwatch yourself.**
+6. `comparisons/` → Read the full verdicts.
 
 ---
 
@@ -138,8 +162,8 @@ uv run jupyter notebook
 ```
 When should you use each approach?
 
-Pure RAG  →  Learning, Research, Maximum Control
-LlamaIndex →  Prototyping, Production, Team Projects
+Pure RAG  →  Learning, Research, Maximum Control, Debugging
+LlamaIndex →  Prototyping, Production, Team Projects, Scale
 ```
 
 ---

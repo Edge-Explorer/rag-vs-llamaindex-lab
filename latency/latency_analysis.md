@@ -1,122 +1,122 @@
 # Latency Analysis: Pure RAG vs LlamaIndex
 
-A breakdown of where time is spent in each pipeline stage, and what we observed during the lab.
+**Real benchmark results measured on 2026-03-29 using `time.time()` in `latency/00_latency_benchmark.ipynb`.**
 
 ---
 
-> ⚠️ **Honest Note:** We did not run formal benchmarks with `time.time()` in this lab. The observations below are **qualitative** — based on what we directly experienced while running both pipelines. The "Next Steps" section provides the exact code to run a real benchmark.
+## 🏆 Official Results
+
+| Pipeline Stage | Pure RAG (Manual) | LlamaIndex (Framework) |
+|:---|:---:|:---:|
+| **Chunking / Indexing** | `0.0000s` | `0.7142s` (chunk + embed) |
+| **Embedding** | `9.6219s` (serial loop) | *(included above)* |
+| **Retrieval** | `0.4761s` | `0.4777s` |
+| **Generation** | `1.0453s` | `1.5026s` |
+| **TOTAL** | **`11.1433s`** | **`2.6945s`** |
+
+> 🥇 **LlamaIndex is 4.1x faster** than Pure RAG on the same hardware, same API, same data.
 
 ---
 
-## 1. Where Time Is Spent in a RAG Pipeline
+## 🕵️ Root Cause Analysis
+
+### Why did Pure RAG lose by so much?
+
+The bottleneck was **serial embedding** — the `for` loop that sends one API call at a time:
 
 ```
-Stage 1: CHUNKING       → Fast (CPU only, no API)
-Stage 2: EMBEDDING      → Slow (API call per chunk or batch)
-Stage 3: INDEXING       → Medium (storing vectors in memory)
-Stage 4: RETRIEVAL      → Very Fast (dot-product math, no API)
-Stage 5: GENERATION     → Slowest (full LLM inference)
+Pure RAG Embedding Loop:
+Chunk 1 → [send] → [wait] → [receive]    (0.6s)
+Chunk 2 → [send] → [wait] → [receive]    (0.6s)
+Chunk 3 → [send] → [wait] → [receive]    (0.6s)
+...×16 chunks
+= 9.62 seconds total
 ```
 
-**The Golden Rule:** Embedding + Generation dominate latency. Chunking and Retrieval are nearly instant.
+### Why did LlamaIndex win?
 
----
-
-## 2. Qualitative Observations from the Lab
-
-### Embedding Phase (Both approaches use `gemini-embedding-001`)
-
-| Observation | Pure RAG | LlamaIndex |
-|:---|:---|:---|
-| API calls | 1 per chunk (manual loop) | Batched automatically |
-| Perceived speed | Slower for many chunks | Noticeably faster for same input |
-| Network round-trips | N (one per chunk) | Fewer (batched) |
-
-**Why LlamaIndex felt faster during embedding:** It batches multiple chunks into a single API call instead of making N separate requests. This reduces network overhead significantly.
-
-### Retrieval Phase (Pure dot-product math — no API)
-
-| Observation | Pure RAG | LlamaIndex |
-|:---|:---|:---|
-| Algorithm | NumPy dot product | Cosine similarity (internal) |
-| Perceived speed | Instant | Instant |
-| API calls | ❌ None | ❌ None |
-
-Both were near-instant. **Retrieval is cheap.** The LLM is never involved here — it's pure math.
-
-### Generation Phase (Both use `gemini-2.0-flash`)
-
-| Observation | Pure RAG | LlamaIndex |
-|:---|:---|:---|
-| API calls | 1 (manual prompt) | 1 (`CompactAndRefine`) |
-| Perceived speed | Similar | Similar |
-| Tokens sent | Manual — we control it | Automatic — may send more context |
-
-Both pipelines had similar generation speed since they use the same model. LlamaIndex may send slightly more tokens depending on how `CompactAndRefine` formats the context.
-
----
-
-## 3. Theoretical Latency Breakdown
+LlamaIndex sends all chunks **in a single batched API request**, eliminating the round-trip wait for each chunk:
 
 ```
-Total Latency = Chunking + (Embedding × N chunks) + Retrieval + Generation
-
-Pure RAG:    ≈ 5ms   + (250ms × N)   + 2ms  + 1200ms
-LlamaIndex:  ≈ 5ms   + (150ms × N*)  + 2ms  + 1200ms
-                              ↑
-                    *Batching reduces per-chunk embedding time
+LlamaIndex Batched Embedding:
+[Chunk 1, Chunk 2, ..., Chunk 16] → [send once] → [receive all]
+= 0.71 seconds total (including chunking!)
 ```
 
-**Estimated savings from LlamaIndex batching:** ~40% faster during indexing for large document sets.
+**This is a 13.5x improvement on the embedding step alone.**
 
 ---
 
-## 4. When Latency Actually Matters
+## 📊 Stage-by-Stage Breakdown
 
-| Scale | Pure RAG Impact | LlamaIndex Impact |
-|:---|:---|:---|
-| 1–10 chunks (our lab) | ✅ Negligible | ✅ Negligible |
-| 100–1,000 chunks | ⚠️ Embedding loop becomes slow | ✅ Batching helps significantly |
-| 10,000+ chunks | ❌ Manual embedding is a bottleneck | ✅ Async + batching essential |
+### Stage 1: Chunking
 
-For our lab (3–10 chunks), both approaches felt identical. At production scale, LlamaIndex's batching and async support make a real difference.
+| | Pure RAG | LlamaIndex |
+|:---|:---:|:---:|
+| Time | `0.0000s` | Combined with Embedding |
+| Method | Character sliding window | Token-aware `SentenceSplitter` |
+| Notes | Nearly instant (pure Python) | — |
 
----
-
-## 5. How to Run a Real Benchmark (Next Steps)
-
-Add this to any notebook to measure exact timings:
-
-```python
-import time
-
-# Benchmark Embedding
-start = time.time()
-index = VectorStoreIndex.from_documents(documents)
-embed_time = time.time() - start
-print(f"Indexing Time: {embed_time:.3f}s")
-
-# Benchmark Retrieval
-start = time.time()
-results = retriever.retrieve("Your question here")
-retrieve_time = time.time() - start
-print(f"Retrieval Time: {retrieve_time:.4f}s")
-
-# Benchmark Generation
-start = time.time()
-response = query_engine.query("Your question here")
-gen_time = time.time() - start
-print(f"Generation Time: {gen_time:.3f}s")
-
-print(f"\nTotal Pipeline: {embed_time + retrieve_time + gen_time:.3f}s")
-```
+**Key Insight:** Chunking itself is essentially **free**. It's all local CPU math — no network, no API. This confirms that chunking strategy choice is about *quality*, not speed.
 
 ---
 
-## 6. Key Takeaways
+### Stage 2: Embedding
 
-1. **Retrieval is always fast** — it's dot-product math with zero API calls.
-2. **Generation is always the bottleneck** — the LLM is the slow part.
-3. **LlamaIndex wins on embedding speed** at scale due to batching.
-4. **For small documents (our lab)**: difference is negligible.
-5. **Formal benchmarking** is a planned next step for this project.
+| | Pure RAG | LlamaIndex |
+|:---|:---:|:---:|
+| Time | `9.6219s` | `~0.71s` *(batched)* |
+| Pattern | Serial `for` loop | Internal batch request |
+| API Calls | 16 separate calls | 1 batched call |
+
+**Key Insight:** The embedding stage was responsible for **86% of Pure RAG's total time**. This is THE bottleneck in any RAG system — and batching eliminates it.
+
+---
+
+### Stage 3: Retrieval
+
+| | Pure RAG | LlamaIndex |
+|:---|:---:|:---:|
+| Time | `0.4761s` | `0.4777s` |
+| Method | NumPy dot product | Cosine similarity (internal) |
+| API Calls | 1 *(query embedding)* | 1 *(query embedding)* |
+
+**Key Insight:** Both pipelines were **identical** here — both had to embed the query (one API call) and then do vector math. No framework advantage.
+
+---
+
+### Stage 4: Generation
+
+| | Pure RAG | LlamaIndex |
+|:---|:---:|:---:|
+| Time | `1.0453s` | `1.5026s` |
+| Method | Manual prompt template | `CompactAndRefine` synthesizer |
+| API Calls | 1 | 1+ *(may re-rank/refine)* |
+
+**Key Insight:** LlamaIndex was *slightly slower* here because `CompactAndRefine` synthesizer may make additional internal calls to structure the response. For simple queries, a manual prompt is faster.
+
+---
+
+## 🔑 Key Takeaways
+
+1. **Batching wins.** The single biggest optimization any RAG system can make is to stop sending embeddings one by one.
+
+2. **Retrieval is always near-instant.** Vector similarity math takes milliseconds regardless of approach.
+
+3. **Generation dominates at scale.** For complex multi-document queries, LLM generation time grows. For simple RAG, it's ~1s.
+
+4. **Frameworks trade transparency for efficiency.** LlamaIndex's "magic" is engineering you don't have to write yourself.
+
+---
+
+## 📋 Test Parameters
+
+| Parameter | Value |
+|:---|:---|
+| **Test text** | "LlamaIndex is a data framework..." × 30 repetitions |
+| **Text length** | 3,060 characters |
+| **Total chunks (Pure RAG)** | 16 chunks (`size=200, overlap=50`) |
+| **Query** | "What is LlamaIndex?" |
+| **Embedding model** | `models/gemini-embedding-001` |
+| **LLM** | `models/gemini-2.0-flash` |
+| **Benchmark date** | 2026-03-29 |
